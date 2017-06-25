@@ -1,0 +1,146 @@
+; This program selects the correct screen to output to the colorizer.
+; The inputs are keyboard and player_screen. 
+; The outputs are a SetHigh bit to Port Adresses 00, 01, 02.
+; These adresses represent the current state of the program.
+;
+; created by Mark Chernishoff Dec 1, 2016 for ECE540 Final Project.
+
+
+NAMEREG		sF,			Keyboard	; keyboard values
+NAMEREG		sE,			PlayerScreen; Player Screen values
+NAMEREG		sD,			SetHigh	
+
+
+; Port addresses
+CONSTANT	PA_KEYBD,		00		; input, keyboard Port address
+CONSTANT	PA_PLYRSCRN,	01		; input, which player lost, 01 green player won, 02 red player won
+CONSTANT	PA_DP,			02		; (o) decimal points 3:0 port address
+CONSTANT	PA_GAMESCRN,	03		; output, game screen
+CONSTANT	PA_GREENPLYR,	04		; output, green player won
+CONSTANT	PA_REDPLYR,		05		; output, red player won
+CONSTANT	PA_FIRSTSCRN,	06		; output, first screen
+
+
+CONSTANT	MSK_DECPTS,		0F		; Decimal points 3 - 0 are in bits 3 to 0
+CONSTANT	SP_OLDDP,		27		; Old decimal points
+
+CONSTANT	state,			03		; holds the current state value
+CONSTANT	state0,			00		; state 0
+CONSTANT	state1,			01		; state 0
+CONSTANT	state2,			02		; state 0
+
+CONSTANT	SP_TEMP1,		04		; Temp storage while in interrupt
+CONSTANT	SP_TEMP2,		05		; 
+
+ADDRESS	000
+				JUMP	main						; workaround to avoid location 3 corruption
+				JUMP	main						; by Vivado Hardware Manager.  Bug was flagged by
+				JUMP	main						; Ken Chapman and is known to be in 2014.2
+				JUMP	main						; Address 003 can be corrupted by Vivado HW manager
+													;
+main:			LOAD	s1,		00					; turn off decimal points 3-0.  Decimal point 0 (rightmost
+				STORE	s1,		SP_OLDDP			; and save the value	
+				CALL	SS_wrdpts					; will be toggled in the interrupt handler
+				LOAD	SetHigh,	01				;
+				LOAD		s1,		state0
+				STORE		s1,		state
+				OUTPUT		SetHigh,		PA_FIRSTSCRN
+				ENABLE	INTERRUPT					; get the ball rolling
+
+main_l0:		CALL		delay_100ms				; delay program 50 ms
+				CALL		toggleDP				; toggle the dp, watchdog timer
+				JUMP		main_l0
+
+				; using the right most decimal point as watchdog timer
+
+toggleDP:		FETCH		s6,		SP_OLDDP			;	toggle  decimal point 0 (rightmost)
+				XOR			s6,		01					;
+				OUTPUT		s6,		PA_DP				;	write directly to decpt port to avoid having to save s1
+				STORE		s6,		SP_OLDDP			;
+				RETURN
+; 100 ms delay while to toggle watchdog timer led				
+delay_100ms: 	LOAD s2, 0F							; 0F4240 is 100 ms delay
+                LOAD s1, 42
+                LOAD s0, 40
+                JUMP software_delay		
+
+software_delay: LOAD s0, s0             ;pad loop to make it 10 clock cycles (5 instructions)
+                SUB s0, 1'd
+                SUBCY s1, 0'd
+                SUBCY s2, 0'd
+                JUMP NZ, software_delay
+                RETURN 
+				
+SS_wrdpts:		LOAD		s0,		s1					; Copy the decimal points to s0 to leave s1 unchanged
+				AND			s0,		MSK_DECPTS			; and mask out the unused bits
+				OUTPUT		s0,		PA_DP				; write the decimal points to the display
+				RETURN	
+
+FSM:			FETCH		s0,				state			; 		get current state
+				COMPARE		s0,				state0			;
+				JUMP		Z,				stZero			;		if state0 get keyboard input
+				COMPARE		s0,				state1
+				JUMP		Z,				stOne
+				COMPARE		s0,				state2
+				JUMP		Z,				stTwo				
+returnSM:		RETURN
+				
+stZero:			COMPARE		Keyboard,		01				; if enter pressed move on to gameplay
+				JUMP		NZ,				returnSM
+				OUTPUT		SetHigh,		PA_GAMESCRN		; set bit high for gamescreen
+				LOAD		s1,				state1
+				STORE		s1,				state
+				RETURN
+
+stOne:			COMPARE		PlayerScreen,	01				; if 01, then green player won
+				JUMP		Z,				greenwon	
+				COMPARE		PlayerScreen,	02
+				JUMP		Z,				redwon
+				RETURN
+
+stTwo:			COMPARE		Keyboard,		02				; if space pressed move on back to first screen
+				JUMP		Z,				firstScreen
+				COMPARE		Keyboard,		01				; if enter pressed move on to gameplay
+				JUMP		Z,				contGame
+				
+				RETURN
+
+contGame:		OUTPUT		SetHigh,		PA_GAMESCRN		; set bit high for gamescreen
+				LOAD		s1,				state1
+				STORE		s1,				state
+				RETURN
+
+firstScreen:	OUTPUT		SetHigh,		PA_FIRSTSCRN	; set bit high for first screen
+				LOAD		s1,				state0
+				STORE		s1,				state
+				RETURN
+				
+greenwon:		OUTPUT		SetHigh,		PA_GREENPLYR	; 	
+				LOAD		s1,				state2
+				STORE		s1,				state			; next state is 2
+				RETURN
+				
+redwon:			OUTPUT		SetHigh,		PA_REDPLYR		; 
+				LOAD		s1,				state2
+				STORE		s1,				state			; next state is 3
+				RETURN
+; =========================
+; === Interrupt Handler ===
+; =========================
+ADDRESS 300
+isr:			STORE		s0,				SP_TEMP1		;		Save s0 and s1
+				STORE		s1,				SP_TEMP2
+				INPUT		Keyboard,		PA_KEYBD		;		get keyboard value
+				AND			Keyboard,		03				; 		Only care about lower 2 bits
+				INPUT		PlayerScreen,	PA_PLYRSCRN		;		get player screen value
+				AND			PlayerScreen,	03				; 		Only care about lower 2 bits
+				CALL		FSM								; go to state machine
+				FETCH		s0,				SP_TEMP1
+				FETCH		s1,				SP_TEMP2				
+				RETURNI			ENABLE				;	and return from interrupt			
+
+; ========================
+; === Interrupt vector ===
+; ========================
+ADDRESS 3FF
+intvect:		JUMP	isr							; jump to interrupt service routine
